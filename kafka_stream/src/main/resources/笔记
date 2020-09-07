@@ -1,0 +1,29 @@
+Kafka Stream的大部分API还是比较容易理解和使用的，但是，其中的时间窗口聚合即windowBy方法还是需要仔细研究下，否则很容易使用错误。
+
+WindowBy
+根据时间窗口做聚合，是在实时计算中非常重要的功能。比如我们经常需要统计最近一段时间内的count、sum、avg等统计数据。
+
+grace(Duration.ZERO)和suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+	
+	suppress的意思是：抑制住上游流的输出，直到当前时间窗口关闭后，才向下游发送数据。前面我们说过，每当统计值产生变化时，统计的结果会立即发送给下游。但是有些情况下，比如我们从kafka中的消息记录了应用程序的每次gc时间，我们的流任务需要统计每个时间窗口内的平均gc时间，然后发送给下游(下游可能是直接输出到控制台，也可能是另一个kafka topic或者一段报警逻辑)。那么，只要当这个时间窗口关闭时，向下游发送一个最终结果就够了。而且有的情况下，如果窗口还没关闭就发送到下游，可能导致错误的逻辑（比如数据抖动产生误报警）。
+	grace的意思是，设立一个数据晚到的期限，这个期限过了之后时间窗口才关闭。比如窗口大小为5，当15:20的时候，15:15-15:20的窗口应当关闭了，但是为了防止网络延时导致数据晚到，比如15点22分的时候，有可能才接收时间戳是15点20分的数据。所以我们可以把这个晚到时间设为2分钟，那么知道15点22的时候，15:15-15:20的窗口才关闭。
+	
+	注意一个坑：**如果使用Suppressed.untilWindowCloses，那么窗口必须要指定grace。因为默认的grace时间是24小时。所以24小时之内窗口是一直不关闭的，而且由于被suppress住了，所以下游会一直收不到结果。**另外也可以使用Suppressed.untilTimeLimit来指定上游聚合计算的值在多久后发往下游，它与窗口是否关闭无关，所以可以不使用grace
+	上面的代码中，为了方便，我们令grace为0，也就是当窗口的截止时间到了后立即关闭窗口。
+	另外我们还使用suppress，抑制住中间的计算结果。所以可以看到，每个窗口关闭后，向下游（这里就是控制台）发送了一个最终结果“5”。
+
+	
+	
+时间窗口上聚合计算的坑
+	上面我特意强调了两点，一是所在的窗口都进行聚合计算，二是聚合计算的结果立即发往下游。第二点我们已经验证了。我们将最开始Tumbling time window的程序加上suppres进一步验证一下。
+
+
+总结
+	Kafka Stream中有4种时间窗口：Tumbling time window、Hopping time window、sliding time window、session time window
+	可以使用supress方法不让每次新的数据落到窗口内时，都立即向下游发送新的统计值。
+	如果使用Suppressed.untilWindowCloses，那么窗口必须要指定grace。因为默认的grace时间是24小时。所以24小时之内窗口是一直不关闭的，而且由于被suppress住了，所以下游会一直收不到结果。
+	可以使用Suppressed.untilTimeLimit来指定上游聚合计算的值在多久后发往下游，它与时间窗口是否关闭无关，所以可以不使用grace。
+	到达的数据落到的每个窗口上，都会立即、分别调用该窗口的聚合函数，计算结果默认情况下立即发送到下游，除非使用了suppress()。
+	Aggregator内应当只负责聚合计算，不应把其他的逻辑(比如将计算结果保存到db)写到Aggreagator里面。如果这样做了，一旦修改了时间窗口的配置，修改了时间窗口类型、grace、suppress等，会导致混乱的结果。
+	KafkaStream的默认TimeStampExtractor，会提取消息中内嵌的时间戳，供依赖于时间的操作(如windowBy)使用。这个时间戳可能是Producer程序中ProducerRecord生成的时刻，也可能是消息写入到topic的log文件中的时刻，取决于message.timestamp.type配置。
+	如果要使用事件时间，发送消息时可将事件时间信息保存到消息内容里，然后将消息发送到kafka。在KafkaStream应用中，继承TimeStampExtractor，在重载的extract方法中定义如何从消息中抽取时间时间。并在构造KafkaStream的props里配置上该自定义的时间提取器。	
